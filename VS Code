@@ -1,0 +1,337 @@
+library(tidyverse)
+library(lubridate)
+library(conflicted)
+
+# Handle common namespace conflicts
+conflicts_prefer("filter", "dplyr")
+conflicts_prefer("lag", "dplyr")
+
+# 1. Load local files
+# Roupp's 2026 breakout data
+roupp_raw <- read.csv("c:/Users/scott/Downloads/694738_data.csv")
+# Nola's 2018 Cy Young caliber season data
+nola_raw <- read.csv("c:/Users/scott/Downloads/605400_data.csv")
+
+# 2. Function to calculate whiff rates for all pitch types
+get_arsenal_whiffs <- function(data, label) {
+  data %>%
+    filter(!is.na(pitch_name), !is.na(description)) %>%
+    group_by(pitch_name) %>%
+    summarize(
+      player = label,
+      swings = sum(description %in% c("swinging_strike", "swinging_strike_blocked", "foul", "foul_tip", "hit_into_play", "missed_bunt", "foul_bunt"), na.rm = TRUE),
+      whiffs = sum(description %in% c("swinging_strike", "swinging_strike_blocked", "missed_bunt"), na.rm = TRUE),
+      whiff_rate = (whiffs / max(1, swings)) * 100
+    ) %>%
+    filter(swings > 5) # Filter out pitches with a low sample size
+}
+
+# 3. Process the data
+roupp_all <- get_arsenal_whiffs(roupp_raw, "Roupp (2026)")
+nola_all <- get_arsenal_whiffs(nola_raw, "Nola (2018)")
+
+# 4. Combine for side-by-side comparison
+plot_data <- bind_rows(roupp_all, nola_all)
+
+# 5. Create the Comparison Graph
+comparison_plot <- ggplot(plot_data, aes(x = pitch_name, y = whiff_rate, fill = player)) +
+  geom_col(position = "dodge", color = "black") +
+  # Adding a benchmark line to show the 'Elite' 33% threshold
+  geom_hline(yintercept = 33, linetype = "dashed", color = "#555555", linewidth = 0.8) +
+  annotate("text", x = 0.5, y = 35, label = "Elite Threshold (33%)", color = "#555555", fontface = "italic", hjust = 0) +
+  geom_text(aes(label = paste0(round(whiff_rate, 1), "%")), 
+            position = position_dodge(width = 0.9), vjust = -0.5, size = 4, fontface = "bold") +
+  # Custom colors: Giants Orange and Phillies Red
+  scale_fill_manual(values = c("Roupp (2026)" = "#FD5A1E", "Nola (2018)" = "#E81828")) +
+  labs(
+    title = "Full Arsenal Whiff Comparison",
+    subtitle = "Landen Roupp (2026) vs. Aaron Nola (2018) Whiff Rates by Pitch Type",
+    x = "Pitch Name",
+    y = "Whiff Percentage (%)",
+    caption = "Whiff Rate = Swinging Strikes / Total Swings\nSource: MLB Statcast"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", size = 16),
+    axis.text.x = element_text(face = "bold", size = 10, angle = 45, hjust = 1),
+    panel.grid.major.x = element_blank()
+  ) +
+  expand_limits(y = c(0, 60))
+
+print(comparison_plot)
+
+# 6. Strike Zone Heat Map Comparison
+message("Generating Strike Zone Heat Maps...")
+
+# Filter for signature pitches and remove rows with missing coordinates
+roupp_best <- roupp_raw %>% 
+  filter(pitch_name == "Curveball", !is.na(plate_x), !is.na(plate_z)) %>%
+  mutate(player = "Roupp (2026)")
+
+nola_best <- nola_raw %>% 
+  filter(pitch_name == "Knuckle Curve", !is.na(plate_x), !is.na(plate_z)) %>%
+  mutate(player = "Nola (2018)")
+
+combined_best <- bind_rows(roupp_best, nola_best)
+
+# Define a standard strike zone box (values in feet)
+sz_xmin <- -0.85
+sz_xmax <- 0.85
+sz_ymin <- 1.6
+sz_ymax <- 3.4
+
+# Create the 2D Heat Map
+heat_map_plot <- ggplot(combined_best, aes(x = plate_x, y = plate_z)) +
+  # Use filled density contours for the "heat"
+  stat_density_2d_filled(alpha = 0.8, show.legend = FALSE) +
+  # Add the strike zone box
+  geom_rect(xmin = sz_xmin, xmax = sz_xmax, ymin = sz_ymin, ymax = sz_ymax,
+            fill = NA, color = "white", linetype = "dashed", linewidth = 1) +
+  facet_wrap(~player) +
+  # Use coord_cartesian to zoom without dropping data points from density calc
+  coord_cartesian(xlim = c(-1.5, 1.5), ylim = c(0, 5)) +
+  # Apply a "hot" color palette that aligns with Giants/Phillies colors
+  scale_fill_brewer(palette = "YlOrRd") +
+  labs(
+    title = "Signature Pitch Location Density",
+    subtitle = "Comparing Command: Roupp Curveball vs. Nola Knuckle Curve",
+    x = "Plate Side (ft)",
+    y = "Height from Ground (ft)",
+    caption = "Dashed box = MLB Strike Zone. High density areas indicate elite command."
+  ) +
+  theme_minimal() +
+  theme(panel.grid.minor = element_blank())
+
+print(heat_map_plot)
+
+# 7. Comparative Movement Profile: Induced Vertical Break (IVB) vs Horizontal Break (HB)
+# This is the "Stuff" analysis. MLB teams look for "Vertical Separation" and unique movement.
+message("Generating Movement Profile Plots...")
+
+process_movement <- function(data, player_label) {
+  data %>%
+    filter(!is.na(pfx_x), !is.na(pfx_z)) %>%
+    mutate(
+      # Convert Statcast feet to inches
+      # pfx_x is catcher's perspective: positive is move toward RHH
+      HB = pfx_x * -12, 
+      IVB = pfx_z * 12,
+      player = player_label
+    )
+}
+
+roupp_movement <- process_movement(roupp_raw, "Roupp (2026)")
+nola_movement <- process_movement(nola_raw, "Nola (2018)")
+
+combined_movement <- bind_rows(roupp_movement, nola_movement)
+
+movement_plot <- ggplot(combined_movement, aes(x = HB, y = IVB, color = pitch_name)) +
+  geom_vline(xintercept = 0, linetype = "dashed", alpha = 0.5) + # Zero horizontal break
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) + # Zero induced vertical break
+  geom_point(alpha = 0.6, size = 2) +
+  facet_wrap(~player) + # Separate plots for each player
+  scale_color_brewer(palette = "Set1") + # A good palette for distinct pitch types
+  labs(
+    title = "Comparative Pitch Movement Profile",
+    subtitle = "Induced Vertical Break vs. Horizontal Movement (Roupp 2026 vs. Nola 2018)",
+    x = "Horizontal Break (Inches)",
+    y = "Induced Vertical Break (Inches)",
+    color = "Pitch Type",
+    caption = "HB: Positive moves toward RHH. IVB: Positive is 'rise'."
+  ) +
+  theme_minimal() +
+  coord_fixed() # Ensures 1:1 aspect ratio for accurate movement representation
+
+print(movement_plot)
+
+# 8. Platoon Splits: Performance by Batter Stand
+# This shows tactical awareness and how he handles his "weakness"
+message("Analyzing Platoon Splits...")
+
+platoon_analysis <- roupp_raw %>%
+  filter(!is.na(stand), !is.na(description)) %>%
+  group_by(stand, pitch_name) %>%
+  summarize(
+    pitches = n(),
+    whiff_rate = sum(description %in% c("swinging_strike", "swinging_strike_blocked")) / 
+                 sum(description %in% c("swinging_strike", "swinging_strike_blocked", "foul", "foul_tip", "hit_into_play")) * 100,
+    .groups = 'drop'
+  ) %>%
+  filter(pitches > 10)
+
+platoon_plot <- ggplot(platoon_analysis, aes(x = pitch_name, y = whiff_rate, fill = stand)) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(values = c("L" = "#555555", "R" = "#FD5A1E")) +
+  labs(
+    title = "Roupp Platoon Whiff Splits",
+    subtitle = "Whiff Rate by Batter Side (L vs R)",
+    x = "Pitch Type",
+    y = "Whiff Rate (%)",
+    fill = "Batter Side"
+  ) +
+  theme_minimal()
+
+print(platoon_plot)
+
+# 9. Release Point Consistency (Tunneling Proxy)
+release_plot <- roupp_raw %>%
+  filter(!is.na(release_pos_x), !is.na(release_pos_z)) %>%
+  ggplot(aes(x = release_pos_x, y = release_pos_z, color = pitch_name)) +
+  geom_point(alpha = 0.4) +
+  labs(title = "Release Point Consistency", subtitle = "Checking for 'Tipping' or Release Variance", x = "Horizontal Release (ft)", y = "Vertical Release (ft)") +
+  theme_minimal() +
+  coord_fixed()
+
+print(release_plot)
+
+# 10. Pitch Arsenal Similarity Analysis
+message("Calculating Pitch Arsenal Similarity...")
+
+get_pitch_traits <- function(data, label) {
+  total_pitches <- nrow(data)
+  data %>%
+    filter(!is.na(pitch_name), !is.na(description)) %>%
+    group_by(pitch_name) %>%
+    summarize(
+      player = label,
+      Velo = mean(release_speed, na.rm = TRUE),
+      IVB = mean(pfx_z, na.rm = TRUE) * 12,
+      HB = mean(pfx_x, na.rm = TRUE) * -12,
+      Usage = (n() / total_pitches) * 100,
+      # Calculate Whiff%
+      swings = sum(description %in% c("swinging_strike", "swinging_strike_blocked", "foul", "foul_tip", "hit_into_play", "missed_bunt", "foul_bunt"), na.rm = TRUE),
+      whiffs = sum(description %in% c("swinging_strike", "swinging_strike_blocked", "missed_bunt"), na.rm = TRUE),
+      Whiff_Pct = (whiffs / max(1, swings)) * 100
+    ) %>%
+    filter(Usage > 2) %>%
+    select(player, pitch_name, Velo, IVB, HB, Usage, Whiff_Pct)
+}
+
+# Extract traits
+roupp_traits <- get_pitch_traits(roupp_raw, "Roupp")
+nola_traits <- get_pitch_traits(nola_raw, "Nola")
+
+# Standardize pitch names for comparison (e.g., Curveball vs Knuckle Curve)
+roupp_traits <- roupp_traits %>% 
+  mutate(pitch_compare = ifelse(pitch_name == "Curveball", "Breaking Ball", pitch_name))
+
+nola_traits <- nola_traits %>% 
+  mutate(pitch_compare = ifelse(pitch_name == "Knuckle Curve", "Breaking Ball", pitch_name))
+
+# Join datasets on mapped pitch types
+comparison_table <- inner_join(
+  roupp_traits, 
+  nola_traits, 
+  by = "pitch_compare", 
+  suffix = c("_Roupp", "_Nola")
+)
+
+# Calculate Similarity Score per pitch type
+similarity_results <- comparison_table %>%
+  mutate(
+    diff_usage = abs(Usage_Roupp - Usage_Nola),
+    diff_velo = abs(Velo_Roupp - Velo_Nola),
+    diff_hb = abs(HB_Roupp - HB_Nola),
+    diff_ivb = abs(IVB_Roupp - IVB_Nola),
+    diff_whiff = abs(Whiff_Pct_Roupp - Whiff_Pct_Nola),
+    avg_diff = (diff_usage + diff_velo + diff_hb + diff_ivb + diff_whiff) / 5,
+    similarity = 100 - avg_diff
+  )
+
+# Print results
+print("Pitch-by-Pitch Trait Comparison:")
+print(similarity_results %>% select(pitch_compare, similarity, avg_diff))
+
+final_score <- mean(similarity_results$similarity)
+cat("\n--- FINAL ARSENAL SIMILARITY SCORE ---\n")
+cat("Roupp (2026) vs Nola (2018): ", round(final_score, 2), "%\n")
+
+# Note: To compare against Logan Webb, load "652415_data.csv" (Webb's ID) 
+# and run it through the same 'get_pitch_traits' and join logic.
+
+# 11. Age Curve Analysis
+message("Generating Age Curve...")
+
+roupp_dob <- as.Date("1998-10-22")
+
+roupp_age_data <- roupp_raw %>%
+  mutate(
+    game_date = as.Date(game_date),
+    # Calculate precise age at time of game
+    age = as.numeric(difftime(game_date, roupp_dob, units = "days")) / 365.25
+  ) %>%
+  filter(!is.na(age), !is.na(release_speed))
+
+age_curve_plot <- ggplot(roupp_age_data, aes(x = age, y = release_speed)) +
+  # Aggregate by date to find mean velocity per outing
+  stat_summary(fun = mean, geom = "point", color = "#FD5A1E", alpha = 0.6) +
+  # Add a trend line to show the "curve"
+  geom_smooth(method = "loess", color = "black", linewidth = 1.2, se = TRUE) +
+  labs(
+    title = "Landen Roupp Velocity Age Curve",
+    subtitle = "Tracking Velocity Evolution by Physical Age",
+    x = "Age (Years)",
+    y = "Average Release Speed (MPH)",
+    caption = "Data: MLB Statcast | Trend: LOESS Smoothing"
+  ) +
+  theme_minimal()
+
+print(age_curve_plot)
+
+
+# 12. FIP- Projection Curve (Next 4 Seasons)
+message("Projecting FIP- Curve...")
+
+# Calculate baseline 2026 stats
+roupp_2026_stats <- roupp_raw %>%
+  summarize(
+    k = sum(events == "strikeout", na.rm = TRUE),
+    bb = sum(events == "walk", na.rm = TRUE),
+    hbp = sum(events == "hit_by_pitch", na.rm = TRUE),
+    hr = sum(events == "home_run", na.rm = TRUE),
+    # Estimate innings pitched based on outs recorded
+    outs = sum(events %in% c("field_out", "strikeout", "strikeout_double_play", "foul_out", 
+                            "force_out", "grounded_into_double_play", "fielders_choice_out"), na.rm = TRUE),
+    ip = outs / 3
+  ) %>%
+  mutate(
+    # Using standard 2026 FIP constant (~3.15) and League Avg FIP (~4.20)
+    fip = ((13 * hr + 3 * (bb + hbp) - 2 * k) / ip) + 3.15,
+    fip_minus = (fip / 4.20) * 100
+  )
+
+baseline_fip_minus <- roupp_2026_stats$fip_minus
+
+# Create projection data based on standard aging curves (Peak at 27-28, slow decline after 29)
+projections <- tibble(
+  season = c(2026, 2027, 2028, 2029, 2030),
+  age = c(27, 28, 29, 30, 31),
+  # Multipliers: 2027 (Peak -2%), 2028 (Flat), 2029 (+3% decline), 2030 (+5% decline)
+  proj_fip_minus = baseline_fip_minus * c(1.0, 0.98, 1.0, 1.03, 1.08),
+  type = c("Actual", "Projected", "Projected", "Projected", "Projected")
+)
+
+fip_minus_plot <- ggplot(projections, aes(x = season, y = proj_fip_minus, group = 1)) +
+  geom_line(linewidth = 1.2, color = "#FD5A1E") +
+  geom_point(aes(color = type), size = 4) +
+  # Add league average line
+  geom_hline(yintercept = 100, linetype = "dashed", color = "black", alpha = 0.5) +
+  annotate("text", x = 2026, y = 102, label = "League Average (100)", size = 3, hjust = 0) +
+  scale_color_manual(values = c("Actual" = "#000000", "Projected" = "#FD5A1E")) +
+  labs(
+    title = "Landen Roupp FIP- Projection Curve",
+    subtitle = "Projected Performance relative to League Average (Lower is Better)",
+    x = "Season",
+    y = "FIP- (League Normalized)",
+    caption = "Baseline: 2026 Statcast Data | Projections: Standard Pitcher Aging Profile",
+    color = "Data Status"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  # Flip Y axis because lower FIP- is better
+  scale_y_reverse(breaks = seq(60, 120, 10))
+
+print(fip_minus_plot)
+
+message("Analysis Complete.")
